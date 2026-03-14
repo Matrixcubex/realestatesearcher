@@ -50,7 +50,6 @@ def geocode_address(address):
 
 def download_url_offline(url, house_id):
     """Obtiene el HTML crudo de la propiedad en memoria o el link de YouTube nativo"""
-    
     if 'youtube.com' in url or 'youtu.be' in url:
         return url, "video"
             
@@ -91,7 +90,6 @@ def extract_property_cards_from_html(html, base_url):
     links = []
     
     # Buscar enlaces que parezcan apuntar a una propiedad
-    # Regex asume que tiene 'propiedad', 'inmueble', 'casa', o un ID numérico largo
     for a in soup.find_all('a', href=True):
         href = a['href']
         if re.search(r'(inmueble|propiedad|casa|departamento|venta|\d{5,})', href.lower()):
@@ -123,7 +121,7 @@ def extract_data_from_card_url(url, lat_base, lon_base, search_term=""):
         texto_pagina = soup.get_text().lower()
         search_term = search_term.lower()
         
-        # 1. Buscar precio más inteligentemente usando regex y clases de tarjetas (Lamudi, Trovit, Tecnocasa)
+        # 1. Buscar precio más inteligentemente usando regex y clases de tarjetas
         precio = None
         
         # Intentar extraer de meta tags o schema.org primero (la forma más limpia)
@@ -132,7 +130,7 @@ def extract_data_from_card_url(url, lat_base, lon_base, search_term=""):
             precio = float(meta_price['content'])
             
         if not precio:
-            # Buscar en textos comunes de los ejemplos enviados (card-precio, price__actual, snippet__content__price, p-detalle)
+            # Buscar en textos comunes de los ejemplos enviados
             for price_class in ['card-precio', 'price__actual', 'snippet__content__price', 'value__title', 'p-detalle', 'div-verde']:
                 price_tags = soup.find_all(class_=re.compile(price_class, re.I))
                 for price_tag in price_tags:
@@ -249,7 +247,8 @@ def process_site_workflow(base_url, lat, lon, search_term):
             add_script_run_ctx(ctx=ctx)
         return extract_data_from_card_url(u, lat, lon, sterm)
         
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # LIMITADO A 2 WORKERS PARA NO SATURAR LA RAM EN STREAMLIT CLOUD
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = {executor.submit(wrapped_extract, u, lat, lon, search_term): u for u in card_urls}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
@@ -266,25 +265,22 @@ def run_real_scraping_engine(query, custom_sites, lat, lon, max_links=10, progre
     casas_encontradas = []
     base_urls = []
     
-    # 1. Añadir sitios web crudos dados por el usuario (URLs de búsquedas) directamente
-    # De esta manera la aplicación va exactamente a la URL donde el usuario ya hizo la búsqueda
-    # o a la página principal de inmbuebles sin depender de que Google indexe todo correctamente.
+    # 1. Añadir sitios web crudos dados por el usuario
     if custom_sites:
         for site in custom_sites:
-            # Asegurarse que tenga http
             if not site.startswith('http'):
                 site = 'https://' + site
             if site not in base_urls:
                 base_urls.append(site)
 
-    # 2. Buscar en Google la query general del usuario para descubrir sitios nuevos
+    # 2. Buscar en Google la query general del usuario (Protegido por si Google banea la IP)
     if query:
         try:
             for url in search(query, num_results=max_links):
                 if url not in base_urls:
                     base_urls.append(url)
         except Exception as e:
-            st.warning(f"Error consultando Google: {e}")
+            st.warning(f"⚠️ Google bloqueó la búsqueda automática (muy común en la nube). Usa sitios personalizados abajo. Error: {e}")
     
     if not base_urls:
         return []
@@ -297,8 +293,6 @@ def run_real_scraping_engine(query, custom_sites, lat, lon, max_links=10, progre
     if progress_chart:
         progress_chart.line_chart(chart_data)
         
-    # Cambiado a ThreadPoolExecutor 100% para evitar el error missing ScriptRunContext 
-    # del Spawning ProcessPool multithreading en Windows
     ctx = get_script_run_ctx()
     
     def wrapped_process(url, lat, lon, query):
@@ -306,7 +300,8 @@ def run_real_scraping_engine(query, custom_sites, lat, lon, max_links=10, progre
             add_script_run_ctx(ctx=ctx)
         return process_site_workflow(url, lat, lon, query)
         
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+    # LIMITADO A 3 WORKERS PARA EVITAR CONGELAMIENTO DE MEMORIA
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(wrapped_process, url, lat, lon, query): url for url in base_urls}
         
         for future in concurrent.futures.as_completed(futures):
@@ -321,8 +316,6 @@ def run_real_scraping_engine(query, custom_sites, lat, lon, max_links=10, progre
                 progress_chart.add_rows(chart_data)
 
     return casas_encontradas
-
-
 
 def get_route_osrm(lat1, lon1, lat2, lon2):
     """Obtiene la ruta entre dos puntos usando la API pública gratuita de OSRM"""
@@ -367,253 +360,224 @@ with tab_buscar:
     with col_sidebar:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader("🎯 Criterios de Búsqueda")
-        
         st.markdown("**1. Búsqueda y Origen**")
-    
-    busqueda_web_global = st.text_input("Ingresa tu búsqueda literal (ej. 'casa 150 m2 una planta coyoacan'):", value="casa coyoacan")
-    direccion_input = st.text_input("Ubicación Origen (para trazar ruta):", value="Coyoacán, CDMX")
+        
+        busqueda_web_global = st.text_input("Ingresa tu búsqueda literal (ej. 'casa 150 m2 una planta coyoacan'):", value="casa coyoacan")
+        direccion_input = st.text_input("Ubicación Origen (para trazar ruta):", value="Coyoacán, CDMX")
 
-    
-    # Variables de estado para lat y lon persistentes
-    if "origen_lat" not in st.session_state:
-        st.session_state["origen_lat"] = 19.4326
-    if "origen_lon" not in st.session_state:
-        st.session_state["origen_lon"] = -99.1332
+        # Variables de estado para lat y lon persistentes
+        if "origen_lat" not in st.session_state:
+            st.session_state["origen_lat"] = 19.4326
+        if "origen_lon" not in st.session_state:
+            st.session_state["origen_lon"] = -99.1332
 
-    if st.button("📌 Ubicar en Mapa"):
-        with st.spinner("Buscando coordenadas..."):
-            lat, lon = geocode_address(direccion_input)
-            if lat and lon:
-                st.session_state["origen_lat"] = lat
-                st.session_state["origen_lon"] = lon
-                st.session_state["casas_encontradas"] = [] # Limpiar resultados anteriores
-                st.session_state.pop("ruta_activa", None)
-                st.success(f"Encontrado: Lat {lat:.4f}, Lon {lon:.4f}")
-            else:
-                st.error("No encontramos esa dirección. Intenta con un lugar más general.")
-                
-    origen_lat = st.session_state["origen_lat"]
-    origen_lon = st.session_state["origen_lon"]
-    
-    st.markdown("**2. Filtros del Inmueble (Aplicados a Resultados)**")
-    
-    tipo_filtro = st.selectbox("Tipo de Inmueble", ["Todos", "Casa", "Departamento", "Terreno"])
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        precio_min = st.number_input("Precio Mínimo", value=500000, step=100000)
-        m2_min = st.number_input("M2 Mínimo", value=50, step=10)
-    with col2:
-        precio_max = st.number_input("Precio Máximo", value=10000000, step=1000000)
-        m2_max = st.number_input("M2 Máximo", value=1000, step=50)
-        
-    termino_busqueda = st.text_input("Limpiar Extracciones por palabra clave (opcional):", value="")
-    
-    st.markdown("**3. Sitios Base Alternativos (Opcional)**")
-
-    if "custom_sites" not in st.session_state:
-        st.session_state["custom_sites"] = []
-        
-    nuevo_sitio = st.text_input("Añade URLs de páginas (ej. www.centry21.com/propiedad1)")
-    if st.button("➕ Agregar Sitio"):
-        if nuevo_sitio and nuevo_sitio not in st.session_state["custom_sites"]:
-            st.session_state["custom_sites"].append(nuevo_sitio)
-            st.rerun()
-            
-    if st.session_state["custom_sites"]:
-        st.write("Sitios personalizados a buscar:")
-        for idx, site in enumerate(st.session_state["custom_sites"]):
-            cols_site = st.columns([4, 1])
-            cols_site[0].text(f"- {site}")
-            if cols_site[1].button("❌", key=f"del_{idx}"):
-                st.session_state["custom_sites"].remove(site)
-                st.rerun()
-    
-    if st.button("Buscar en Fuentes 🚀"):
-        if not busqueda_web_global:
-            st.error("Por favor, ingresa tu búsqueda literal en el Paso 1.")
-        else:
-            # Mostrar UI de gráfico en progreso arriba (dentro del mismo callback)
-            st.write("---")
-            st.subheader("📈 Progreso de Extracción Concurrente")
-            progreso_container = st.empty()
-            
-            with st.spinner("Despachando Buscadores web, Multiprocesamiento y Hilos de Tarjetas..."):
-                # Se lanza la lógica real concurrente
-                raw_data = run_real_scraping_engine(
-                    query=busqueda_web_global, 
-                    custom_sites=st.session_state["custom_sites"],
-                    lat=origen_lat, 
-                    lon=origen_lon, 
-                    max_links=10,
-                    progress_chart=progreso_container
-                )
-                
-                # Filtrar resultados brutos por precio, m2 y palabra clave
-                filtered = []
-                for c in raw_data:
-                    match_tipo = (tipo_filtro == "Todos" or c["tipo"] == tipo_filtro)
-                    match_precio = (precio_min <= c["precio"] <= precio_max)
-                    match_m2 = (m2_min <= c.get("m2", 0) <= m2_max if c.get("m2") else True) # Si no extrajo m2, no lo descartamos
-                    match_termino = (not termino_busqueda or termino_busqueda.lower() in c["zona"].lower() or termino_busqueda.lower() in c.get("url", "").lower())
-                    
-                    if match_tipo and match_precio and match_m2 and match_termino:
-                        filtered.append(c)
-                
-                st.session_state["casas_encontradas"] = filtered
-                st.session_state.pop("map_selection_id", None)
-                
-                # Desaparecer Gráfico
-                progreso_container.empty()
-                st.success(f"¡Extracción paralela completada! Filtramos {len(filtered)} resultados de la web real.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    if "casas_encontradas" in st.session_state and len(st.session_state["casas_encontradas"]) > 0:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.subheader("📍 Trazar Ruta a Inmueble")
-        
-        # Mapeo id -> casa para acceso rápido
-        casas_dict = {str(c["id"]): c for c in st.session_state["casas_encontradas"]}
-        
-        opciones = [f"ID {c['id']} - {c['tipo']} en {c['zona']} - ${c['precio']:,}" for c in st.session_state["casas_encontradas"]]
-        
-        # Obtener el índice seleccionado si el mapa lo actualizó
-        current_selection_index = 0
-        if "map_selection_id" in st.session_state and str(st.session_state["map_selection_id"]) in casas_dict:
-            target_id = str(st.session_state["map_selection_id"])
-            for idx, opc in enumerate(st.session_state["casas_encontradas"]):
-                if str(opc["id"]) == target_id:
-                    current_selection_index = idx
-                    break
-
-        seleccion_str = st.selectbox("Selecciona una Casa (o haz clic en el mapa)", opciones, index=current_selection_index)
-        
-        # Extraer ID del string seleccionado
-        seleccion_id = seleccion_str.split(" - ")[0].replace("ID ", "")
-        casa_seleccionada = casas_dict[seleccion_id]
-        
-        st.write(f"**Fuente:** {casa_seleccionada['fuente']}")
-        st.markdown(f"**URL:** [{casa_seleccionada['url']}]({casa_seleccionada['url']})")
-        st.write(f"**Precio:** ${casa_seleccionada['precio']:,} {casa_seleccionada['moneda']}")
-        st.write(f"**Ubicación:** Lat {casa_seleccionada['lat']:.4f}, Lon {casa_seleccionada['lon']:.4f}")
-        
-        # --- BOTON PARA AGREGAR A FAVORITOS ---
-        is_saved = any(f["id"] == casa_seleccionada["id"] for f in st.session_state["favoritos"])
-        if not is_saved:
-            if st.button("⭐ Guardar en Favoritos"):
-                with st.spinner("Extrayendo página para vista previa..."):
-                    # Extraer web en memoria
-                    html_content_memory, arch_tipo = download_url_offline(casa_seleccionada["url"], casa_seleccionada["id"])
-                    
-                    casa_copy = dict(casa_seleccionada)
-                    casa_copy["local_file"] = html_content_memory
-                    casa_copy["local_type"] = arch_tipo
-                    
-                    st.session_state["favoritos"].append(casa_copy)
-                    save_favoritos()
-                    
-                    st.success("¡Guardado en Favoritos!")
-                    time.sleep(1)
-                    st.rerun()
-        else:
-            st.info("⭐ Ya está en Favoritos")
-        
-        if st.button("Trazar Ruta y Calcular Tiempos 🗺️"):
-            with st.spinner("Calculando ruta con OSRM..."):
-                ruta = get_route_osrm(origen_lat, origen_lon, casa_seleccionada['lat'], casa_seleccionada['lon'])
-                if ruta:
-                    st.session_state["ruta_activa"] = ruta
-                    st.session_state["casa_dest"] = casa_seleccionada
-                    st.success(f"⏱️ Tiempo estimado (Ida): **{ruta['duracion_min']} minutos** | Distancia: **{ruta['distancia_km']} km**")
+        if st.button("📌 Ubicar en Mapa"):
+            with st.spinner("Buscando coordenadas..."):
+                lat, lon = geocode_address(direccion_input)
+                if lat and lon:
+                    st.session_state["origen_lat"] = lat
+                    st.session_state["origen_lon"] = lon
+                    st.session_state["casas_encontradas"] = [] # Limpiar resultados anteriores
+                    st.session_state.pop("ruta_activa", None)
+                    st.success(f"Encontrado: Lat {lat:.4f}, Lon {lon:.4f}")
                 else:
-                    st.error("No se pudo calcular la ruta.")
+                    st.error("No encontramos esa dirección. Intenta con un lugar más general.")
+                
+        origen_lat = st.session_state["origen_lat"]
+        origen_lon = st.session_state["origen_lon"]
+        
+        st.markdown("**2. Filtros del Inmueble (Aplicados a Resultados)**")
+        
+        tipo_filtro = st.selectbox("Tipo de Inmueble", ["Todos", "Casa", "Departamento", "Terreno"])
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            precio_min = st.number_input("Precio Mínimo", value=500000, step=100000)
+            m2_min = st.number_input("M2 Mínimo", value=50, step=10)
+        with col2:
+            precio_max = st.number_input("Precio Máximo", value=10000000, step=1000000)
+            m2_max = st.number_input("M2 Máximo", value=1000, step=50)
+            
+        termino_busqueda = st.text_input("Limpiar Extracciones por palabra clave (opcional):", value="")
+        
+        st.markdown("**3. Sitios Base Alternativos (Opcional)**")
+
+        if "custom_sites" not in st.session_state:
+            st.session_state["custom_sites"] = []
+            
+        nuevo_sitio = st.text_input("Añade URLs de páginas (ej. www.century21.com/propiedad1)")
+        if st.button("➕ Agregar Sitio"):
+            if nuevo_sitio and nuevo_sitio not in st.session_state["custom_sites"]:
+                st.session_state["custom_sites"].append(nuevo_sitio)
+                st.rerun()
+                
+        if st.session_state["custom_sites"]:
+            st.write("Sitios personalizados a buscar:")
+            for idx, site in enumerate(st.session_state["custom_sites"]):
+                cols_site = st.columns([4, 1])
+                cols_site[0].text(f"- {site}")
+                if cols_site[1].button("❌", key=f"del_{idx}"):
+                    st.session_state["custom_sites"].remove(site)
+                    st.rerun()
+        
+        if st.button("Buscar en Fuentes 🚀"):
+            if not busqueda_web_global:
+                st.error("Por favor, ingresa tu búsqueda literal en el Paso 1.")
+            else:
+                st.write("---")
+                st.subheader("📈 Progreso de Extracción Concurrente")
+                progreso_container = st.empty()
+                
+                with st.spinner("Despachando Buscadores web, Multiprocesamiento y Hilos de Tarjetas..."):
+                    raw_data = run_real_scraping_engine(
+                        query=busqueda_web_global, 
+                        custom_sites=st.session_state["custom_sites"],
+                        lat=origen_lat, 
+                        lon=origen_lon, 
+                        max_links=10,
+                        progress_chart=progreso_container
+                    )
+                    
+                    filtered = []
+                    for c in raw_data:
+                        match_tipo = (tipo_filtro == "Todos" or c["tipo"] == tipo_filtro)
+                        match_precio = (precio_min <= c["precio"] <= precio_max)
+                        match_m2 = (m2_min <= c.get("m2", 0) <= m2_max if c.get("m2") else True)
+                        match_termino = (not termino_busqueda or termino_busqueda.lower() in c["zona"].lower() or termino_busqueda.lower() in c.get("url", "").lower())
+                        
+                        if match_tipo and match_precio and match_m2 and match_termino:
+                            filtered.append(c)
+                    
+                    st.session_state["casas_encontradas"] = filtered
+                    st.session_state.pop("map_selection_id", None)
+                    
+                    progreso_container.empty()
+                    st.success(f"¡Extracción paralela completada! Filtramos {len(filtered)} resultados de la web real.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-with col_map:
-    st.subheader("🌍 Mapa de Resultados")
-    
-    # Crear Mapa base
-    zoom_start = 12
-    m = folium.Map(location=[origen_lat, origen_lon], zoom_start=zoom_start, tiles="CartoDB positron")
-    
-    # Punto de Origen
-    folium.Marker(
-        [origen_lat, origen_lon],
-        popup="Punto Central / Origen",
-        tooltip="Origen",
-        icon=folium.Icon(color="red", icon="home", prefix='fa')
-    ).add_to(m)
-    
-    # Puntos de las casas filtradas
-    if "casas_encontradas" in st.session_state:
-        for c in st.session_state["casas_encontradas"]:
-            # Distintivo visual si el dato es real extraído por el scraper
-            badge = "✅ REAL" if c.get("is_real") else "🛠️ SIMULADO"
-            popup_html = f"<b>{c['tipo']} en {c['zona']}</b><br>{badge} | {c['estado']}, {c['pais']}<br>Precio: ${c['precio']:,}<br>Fuente: {c['fuente']}"
+        if "casas_encontradas" in st.session_state and len(st.session_state["casas_encontradas"]) > 0:
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            st.subheader("📍 Trazar Ruta a Inmueble")
             
-            # Color verde para los reales extraidos, azul simulados, o verde oscuro para seleccionados
-            if c.get("is_real"):
-                icon_color = "orange"
+            casas_dict = {str(c["id"]): c for c in st.session_state["casas_encontradas"]}
+            opciones = [f"ID {c['id']} - {c['tipo']} en {c['zona']} - ${c['precio']:,}" for c in st.session_state["casas_encontradas"]]
+            
+            current_selection_index = 0
+            if "map_selection_id" in st.session_state and str(st.session_state["map_selection_id"]) in casas_dict:
+                target_id = str(st.session_state["map_selection_id"])
+                for idx, opc in enumerate(st.session_state["casas_encontradas"]):
+                    if str(opc["id"]) == target_id:
+                        current_selection_index = idx
+                        break
+
+            seleccion_str = st.selectbox("Selecciona una Casa (o haz clic en el mapa)", opciones, index=current_selection_index)
+            seleccion_id = seleccion_str.split(" - ")[0].replace("ID ", "")
+            casa_seleccionada = casas_dict[seleccion_id]
+            
+            st.write(f"**Fuente:** {casa_seleccionada['fuente']}")
+            st.markdown(f"**URL:** [{casa_seleccionada['url']}]({casa_seleccionada['url']})")
+            st.write(f"**Precio:** ${casa_seleccionada['precio']:,} {casa_seleccionada['moneda']}")
+            st.write(f"**Ubicación:** Lat {casa_seleccionada['lat']:.4f}, Lon {casa_seleccionada['lon']:.4f}")
+            
+            is_saved = any(f["id"] == casa_seleccionada["id"] for f in st.session_state["favoritos"])
+            if not is_saved:
+                if st.button("⭐ Guardar en Favoritos"):
+                    with st.spinner("Extrayendo página para vista previa..."):
+                        html_content_memory, arch_tipo = download_url_offline(casa_seleccionada["url"], casa_seleccionada["id"])
+                        casa_copy = dict(casa_seleccionada)
+                        casa_copy["local_file"] = html_content_memory
+                        casa_copy["local_type"] = arch_tipo
+                        
+                        st.session_state["favoritos"].append(casa_copy)
+                        save_favoritos()
+                        
+                        st.success("¡Guardado en Favoritos!")
+                        time.sleep(1)
+                        st.rerun()
             else:
-                icon_color = "blue"
-                
-            if "ruta_activa" in st.session_state and "casa_dest" in st.session_state:
-                if c["id"] == st.session_state["casa_dest"]["id"]:
-                    icon_color = "green"
-                    
-            folium.Marker(
-                [c['lat'], c['lon']],
-                popup=folium.Popup(popup_html, max_width=250),
-                tooltip=f"ID {c['id']}: ${c['precio']:,} - Click para seleccionar",
-                icon=folium.Icon(color=icon_color, icon="info-sign")
-            ).add_to(m)
+                st.info("⭐ Ya está en Favoritos")
             
-    # Trazar ruta si existe
-    if "ruta_activa" in st.session_state:
-        # Trazar polilinea en el mapa
-        folium.PolyLine(
-            st.session_state["ruta_activa"]["puntos"],
-            color="#03a9f4",
-            weight=5,
-            opacity=0.8
+            if st.button("Trazar Ruta y Calcular Tiempos 🗺️"):
+                with st.spinner("Calculando ruta con OSRM..."):
+                    ruta = get_route_osrm(origen_lat, origen_lon, casa_seleccionada['lat'], casa_seleccionada['lon'])
+                    if ruta:
+                        st.session_state["ruta_activa"] = ruta
+                        st.session_state["casa_dest"] = casa_seleccionada
+                        st.success(f"⏱️ Tiempo estimado (Ida): **{ruta['duracion_min']} minutos** | Distancia: **{ruta['distancia_km']} km**")
+                    else:
+                        st.error("No se pudo calcular la ruta.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_map:
+        st.subheader("🌍 Mapa de Resultados")
+        
+        zoom_start = 12
+        m = folium.Map(location=[origen_lat, origen_lon], zoom_start=zoom_start, tiles="CartoDB positron")
+        
+        folium.Marker(
+            [origen_lat, origen_lon],
+            popup="Punto Central / Origen",
+            tooltip="Origen",
+            icon=folium.Icon(color="red", icon="home", prefix='fa')
         ).add_to(m)
         
-        # Centrar mapa en la casa destino
-        dest = st.session_state["casa_dest"]
-        m.location = [dest['lat'], dest['lon']]
-        m.zoom_start = 14
+        if "casas_encontradas" in st.session_state:
+            for c in st.session_state["casas_encontradas"]:
+                badge = "✅ REAL" if c.get("is_real") else "🛠️ SIMULADO"
+                popup_html = f"<b>{c['tipo']} en {c['zona']}</b><br>{badge} | {c['estado']}, {c['pais']}<br>Precio: ${c['precio']:,}<br>Fuente: {c['fuente']}"
+                
+                if c.get("is_real"):
+                    icon_color = "orange"
+                else:
+                    icon_color = "blue"
+                    
+                if "ruta_activa" in st.session_state and "casa_dest" in st.session_state:
+                    if c["id"] == st.session_state["casa_dest"]["id"]:
+                        icon_color = "green"
+                        
+                folium.Marker(
+                    [c['lat'], c['lon']],
+                    popup=folium.Popup(popup_html, max_width=250),
+                    tooltip=f"ID {c['id']}: ${c['precio']:,} - Click para seleccionar",
+                    icon=folium.Icon(color=icon_color, icon="info-sign")
+                ).add_to(m)
+                
+        if "ruta_activa" in st.session_state:
+            folium.PolyLine(
+                st.session_state["ruta_activa"]["puntos"],
+                color="#03a9f4",
+                weight=5,
+                opacity=0.8
+            ).add_to(m)
+            
+            dest = st.session_state["casa_dest"]
+            m.location = [dest['lat'], dest['lon']]
+            m.zoom_start = 14
 
-    # Capturar eventos de redibujado de Streamlit Folium (Click actions)
-    mapa_output = st_folium(m, width=800, height=600, returned_objects=["last_object_clicked"])
-    
-    # Manejar clics de usuario en el mapa para sincronizar con la selección "Trazar Ruta"
-    if mapa_output.get("last_object_clicked"):
-        click_lat = math.floor(mapa_output["last_object_clicked"]["lat"] * 10000)/10000 
-        click_lon = math.floor(mapa_output["last_object_clicked"]["lng"] * 10000)/10000
+        mapa_output = st_folium(m, width=800, height=600, returned_objects=["last_object_clicked"])
         
-        # Buscar que marker coincide aproximadamente (resolviendo flotantes)
-        for c in st.session_state.get("casas_encontradas", []):
-            if abs(c["lat"] - click_lat) < 0.001 and abs(c["lon"] - click_lon) < 0.001:
-                # Si detecta que hicieron click en este ID
-                if st.session_state.get("map_selection_id") != c["id"]:
-                    st.session_state["map_selection_id"] = c["id"]
-                    st.rerun() # Recargar pagina entera una vez que clickearon para actualizar la barra lateral
+        if mapa_output.get("last_object_clicked"):
+            click_lat = math.floor(mapa_output["last_object_clicked"]["lat"] * 10000)/10000 
+            click_lon = math.floor(mapa_output["last_object_clicked"]["lng"] * 10000)/10000
+            
+            for c in st.session_state.get("casas_encontradas", []):
+                if abs(c["lat"] - click_lat) < 0.001 and abs(c["lon"] - click_lon) < 0.001:
+                    if st.session_state.get("map_selection_id") != c["id"]:
+                        st.session_state["map_selection_id"] = c["id"]
+                        st.rerun()
 
-    st.markdown("---")
-    st.markdown("💡 *El scraper web real está habilitado para bypass básico de Search cajas de Google Index.*")
+        st.markdown("---")
+        st.markdown("💡 *El scraper web real está habilitado para bypass básico de Search cajas de Google Index.*")
 
 with tab_fav:
     st.subheader("⭐ Propiedades Guardadas (Modo Desconectado)")
     
-    # 1. Función Manual para agregar una Propiedad desde URL Directa a favoritos
     with st.expander("Añadir manualmente por URL (YouTube o Portal Web)"):
         url_manual = st.text_input("Ingresa la URL del video o inmueble particular:")
         if st.button("📥 Importar y Guardar"):
             if url_manual:
                 with st.spinner("Descargando y extrayendo contenido manual..."):
                     manual_id = random.randint(100000, 999999)
-                    
-                    # Extraer lo que se pueda
                     base_data = extract_data_from_card_url(url_manual, origen_lat, origen_lon, "")
                     if not base_data:
                         base_data = {
@@ -639,7 +603,6 @@ with tab_fav:
                     time.sleep(1)
                     st.rerun()
                     
-    # Render dividido: Lista a la izquierda, Vista a la Derecha
     if not st.session_state["favoritos"]:
         st.info("Aún no tienes propiedades guardadas. Búscalas en la pestaña principal y añádelas aquí.")
     else:
@@ -649,13 +612,11 @@ with tab_fav:
             if "fav_selected_idx" not in st.session_state:
                 st.session_state["fav_selected_idx"] = 0
                 
-            # Limitar índice de tab por si se eliminó una prop
             if st.session_state["fav_selected_idx"] >= len(st.session_state["favoritos"]):
                 st.session_state["fav_selected_idx"] = 0
                 
             idx_selected = st.session_state["fav_selected_idx"]
             
-            # Crear botones para cada favorito
             for i, f in enumerate(st.session_state["favoritos"]):
                 bcolor = "#e1f5fe" if i == idx_selected else "#ffffff"
                 st.markdown(f"<div style='background-color: {bcolor}; padding: 10px; border-radius: 5px; border: 1px solid #ccc; margin-bottom: 5px;'>", unsafe_allow_html=True)
@@ -671,7 +632,6 @@ with tab_fav:
             
             st.markdown(f"### {fav_curr['tipo']} en {fav_curr['zona']}")
             
-            # --- FORMULARIO DE EDICIÓN ---
             with st.expander("✏️ Editar Detalles Locales"):
                 with st.form(key=f"edit_form_{idx}"):
                     c1, c2, c3 = st.columns(3)
@@ -701,7 +661,6 @@ with tab_fav:
                     new_zona = st.text_input("Título Corto", value=fav_curr['zona'])
                     new_ubicacion = st.text_area("Ubicación Completa", value=fav_curr.get('ubicacion', ''))
                     
-                    # Boton
                     if st.form_submit_button("Guardar Cambios"):
                         st.session_state["favoritos"][idx].update({
                             'precio': new_precio, 'm2': new_m2, 'zona': new_zona, 'recamaras': new_recamaras,
@@ -714,7 +673,6 @@ with tab_fav:
                             'correo': new_correo, 'horario_atencion': new_horario
                         })
                         save_favoritos()
-                        
                         st.success("¡Datos actualizados localmente!")
                         time.sleep(1)
                         st.rerun()
@@ -739,14 +697,12 @@ with tab_fav:
             st_folium(m_fav, width=800, height=300, key=f"map_fav_{idx}")
                 
             st.markdown("#### Vista de la Página Analizada")
-            
-            # Visualizar en memoria el html o video URL
             local_path = fav_curr.get("local_file")
             file_type = fav_curr.get("local_type")
             
             if local_path:
                 if file_type == "video":
-                    st.video(local_path) # link directo a YT
+                    st.video(local_path)
                 else:
                     import streamlit.components.v1 as components
                     components.html(local_path, height=800, scrolling=True)
@@ -765,7 +721,6 @@ with tab_comp:
             st.markdown("#### Seleccionar para comparar")
             for f in st.session_state["favoritos"]:
                 checked = f["id"] in st.session_state["compare_selection"]
-                # Toggle checkbox
                 if st.checkbox(f"{f['tipo']} - ${f['precio']:,} ({f['zona'][:15]}...)", value=checked, key=f"comp_check_{f['id']}"):
                     if f["id"] not in st.session_state["compare_selection"]:
                         st.session_state["compare_selection"].append(f["id"])
@@ -789,7 +744,6 @@ with tab_comp:
                         st.markdown(f"**📍 Ubicación:** {p.get('zona', '')}")
                         st.markdown("---")
                         
-                        # Extra Fields
                         st.markdown(f"**📐 M2:** {p.get('m2', 0)}  <br>"
                                     f"**🛏️ Recámaras:** {p.get('recamaras', 0)}  <br>"
                                     f"**🛀 Baños:** {p.get('banos', 0)}  <br>"
@@ -806,7 +760,6 @@ with tab_comp:
                                     f"**🚽 1/2 Baño:** {p.get('medio_bano', '')}  ", unsafe_allow_html=True)
                         st.markdown("---")
                         
-                        # Info de Contacto
                         st.markdown(f"**📞 Tel:** {p.get('tel_contacto', 'N/D')}  <br>"
                                     f"**📧 Correo:** {p.get('correo', 'N/D')}  <br>"
                                     f"**⏰ Horario:** {p.get('horario_atencion', 'N/D')}  <br>"
@@ -814,12 +767,10 @@ with tab_comp:
                         
                         st.markdown("</div>", unsafe_allow_html=True)
                         
-                        # Mapa individual debajo de la tarjeta
                         m_ind = folium.Map(location=[p['lat'], p['lon']], zoom_start=15, tiles="CartoDB positron")
                         folium.Marker(
                             [p['lat'], p['lon']],
                             popup=p['zona'],
                             icon=folium.Icon(color="purple", icon="star")
                         ).add_to(m_ind)
-                        # Renderizar mapa limitando a ancho completo de columna
                         st_folium(m_ind, width=300, height=250, key=f"map_comp_ind_{p['id']}_{len(selected_props)}")

@@ -1,8 +1,8 @@
-streamlit==1.41.0
-folium==0.19.4
-streamlit-folium==0.23.1
-requests==2.32.3
-beautifulsoup4==4.12.3
-pandas==2.2.3
-polyline==2.0.2
-googlesearch-python==1.2.3
+streamlit
+folium
+streamlit-folium
+requests
+beautifulsoup4
+pandas
+polyline
+googlesearch-python
